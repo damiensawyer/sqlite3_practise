@@ -1,33 +1,29 @@
 #!/bin/bash
 
-# SQLite3 Tutorial Script
-# This script teaches SQLite3 CLI usage by creating a sample database
-# with realistic sensor data and demonstrating various SQL operations
+# Fast SQLite3 Tutorial Script
+# Optimized for high-performance bulk data insertion
 
-# Configuration variables
 NUM_ROOMS=2
 LOGS_PER_ROOM=1000
 DB_FILE="tutorial.db"
+TEMP_CSV="/tmp/sensor_data.csv"
 
-echo "=== SQLite3 CLI Tutorial ==="
-echo "This script will create a sample database with $NUM_ROOMS rooms and $LOGS_PER_ROOM sensor logs per room"
-echo
+echo "=== Fast SQLite3 Tutorial ==="
+echo "Creating $NUM_ROOMS rooms with $LOGS_PER_ROOM logs each"
 
-# Remove existing database to ensure idempotency
-if [ -f "$DB_FILE" ]; then
-  echo "Removing existing database..."
-  rm "$DB_FILE"
-fi
+# Clean up
+rm -f "$DB_FILE" "$TEMP_CSV"
 
-echo "Creating new database: $DB_FILE"
-echo
+echo "Creating database structure..."
 
-# Create database and tables
-echo "=== Creating Tables ==="
-
-# 1. Rooms table
-echo "Creating rooms table..."
+# Create tables without indexes first
 sqlite3 "$DB_FILE" <<EOF
+PRAGMA journal_mode = OFF;
+PRAGMA synchronous = OFF;
+PRAGMA cache_size = 1000000;
+PRAGMA locking_mode = EXCLUSIVE;
+PRAGMA temp_store = MEMORY;
+
 CREATE TABLE rooms (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     room_number TEXT UNIQUE NOT NULL,
@@ -38,34 +34,86 @@ CREATE TABLE rooms (
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE INDEX idx_rooms_building ON rooms(building_name);
-CREATE INDEX idx_rooms_floor ON rooms(floor_number);
-CREATE INDEX idx_rooms_type ON rooms(room_type);
-CREATE INDEX idx_rooms_number ON rooms(room_number);
-EOF
-
-# 2. Sensor logs table
-echo "Creating sensor_logs table..."
-sqlite3 "$DB_FILE" <<EOF
 CREATE TABLE sensor_logs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
     room_id INTEGER NOT NULL,
-    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+    timestamp DATETIME NOT NULL,
     temperature_celsius REAL NOT NULL,
     humidity_percent REAL NOT NULL,
     pressure_hpa REAL NOT NULL,
     co2_ppm INTEGER NOT NULL,
     light_lux REAL NOT NULL,
     noise_db REAL NOT NULL,
-    motion_detected BOOLEAN DEFAULT 0,
+    motion_detected BOOLEAN NOT NULL,
     air_quality_index INTEGER NOT NULL,
-    occupancy_count INTEGER DEFAULT 0,
+    occupancy_count INTEGER NOT NULL,
     voltage_v REAL NOT NULL,
     power_consumption_w REAL NOT NULL,
     FOREIGN KEY (room_id) REFERENCES rooms(id)
 );
+EOF
 
--- Critical indexes for performance with large datasets
+# Generate rooms data
+echo "Generating rooms..."
+buildings=("North Tower" "South Tower" "East Wing" "West Wing" "Central Hub")
+room_types=("Office" "Conference Room" "Laboratory" "Storage" "Classroom" "Break Room")
+
+{
+    echo "BEGIN TRANSACTION;"
+    for ((i = 1; i <= NUM_ROOMS; i++)); do
+        building=${buildings[$((RANDOM % ${#buildings[@]}))]}
+        room_type=${room_types[$((RANDOM % ${#room_types[@]}))]}
+        floor=$((RANDOM % 10 + 1))
+        capacity=$((RANDOM % 50 + 5))
+        room_number="${building:0:1}${floor}$(printf "%02d" $((RANDOM % 99 + 1)))"
+        echo "INSERT INTO rooms (room_number, building_name, floor_number, room_type, capacity) VALUES ('$room_number', '$building', $floor, '$room_type', $capacity);"
+    done
+    echo "COMMIT;"
+} | sqlite3 "$DB_FILE"
+
+# Generate sensor data CSV
+echo "Generating sensor data CSV..."
+{
+    for ((room_id = 1; room_id <= NUM_ROOMS; room_id++)); do
+        for ((j = 1; j <= LOGS_PER_ROOM; j++)); do
+            temp=$(awk "BEGIN {printf \"%.1f\", rand()*60+10}")
+            humidity=$(awk "BEGIN {printf \"%.1f\", rand()*80+20}")
+            pressure=$(awk "BEGIN {printf \"%.1f\", rand()*50+1000}")
+            co2=$((RANDOM % 1500 + 400))
+            light=$(awk "BEGIN {printf \"%.1f\", rand()*2000}")
+            noise=$(awk "BEGIN {printf \"%.1f\", rand()*80+30}")
+            motion=$((RANDOM % 2))
+            aqi=$((RANDOM % 300 + 1))
+            occupancy=$((RANDOM % 20))
+            voltage=$(awk "BEGIN {printf \"%.2f\", rand()*50+200}")
+            power=$(awk "BEGIN {printf \"%.2f\", rand()*5000+100}")
+            
+            days_ago=$((RANDOM % 30))
+            hours=$((RANDOM % 24))
+            minutes=$((RANDOM % 60))
+            seconds=$((RANDOM % 60))
+            timestamp=$(date -d "$days_ago days ago $hours:$minutes:$seconds" '+%Y-%m-%d %H:%M:%S')
+            
+            echo "$room_id,$timestamp,$temp,$humidity,$pressure,$co2,$light,$noise,$motion,$aqi,$occupancy,$voltage,$power"
+        done
+        echo "Generated room $room_id data..." >&2
+    done
+} > "$TEMP_CSV"
+
+# Bulk import CSV
+echo "Bulk importing sensor data..."
+sqlite3 "$DB_FILE" <<EOF
+.mode csv
+.import $TEMP_CSV sensor_logs
+EOF
+
+# Create indexes after data insertion
+echo "Creating indexes..."
+sqlite3 "$DB_FILE" <<EOF
+CREATE INDEX idx_rooms_building ON rooms(building_name);
+CREATE INDEX idx_rooms_floor ON rooms(floor_number);
+CREATE INDEX idx_rooms_type ON rooms(room_type);
+CREATE INDEX idx_rooms_number ON rooms(room_number);
+
 CREATE INDEX idx_sensor_logs_room_id ON sensor_logs(room_id);
 CREATE INDEX idx_sensor_logs_timestamp ON sensor_logs(timestamp);
 CREATE INDEX idx_sensor_logs_temperature ON sensor_logs(temperature_celsius);
@@ -76,196 +124,60 @@ CREATE INDEX idx_sensor_logs_room_time ON sensor_logs(room_id, timestamp);
 CREATE INDEX idx_sensor_logs_temp_time ON sensor_logs(temperature_celsius, timestamp);
 CREATE INDEX idx_sensor_logs_motion ON sensor_logs(motion_detected);
 CREATE INDEX idx_sensor_logs_occupancy ON sensor_logs(occupancy_count);
+
+PRAGMA journal_mode = DELETE;
+PRAGMA synchronous = NORMAL;
+PRAGMA locking_mode = NORMAL;
+
+ANALYZE;
 EOF
 
-echo "All tables created successfully!"
-echo
+# Clean up temp file
+rm -f "$TEMP_CSV"
 
-# Insert sample data
-echo "=== Inserting Sample Data ==="
+echo "Data insertion complete!"
 
-# Generate rooms
-echo "Generating $NUM_ROOMS rooms..."
-buildings=("North Tower" "South Tower" "East Wing" "West Wing" "Central Hub")
-room_types=("Office" "Conference Room" "Laboratory" "Storage" "Classroom" "Break Room")
+# Quick verification
+echo "=== Database Stats ==="
+sqlite3 "$DB_FILE" "SELECT 'Rooms:', COUNT(*) FROM rooms; SELECT 'Sensor logs:', COUNT(*) FROM sensor_logs;"
 
-(
-  echo "BEGIN TRANSACTION;"
-  for ((i = 1; i <= NUM_ROOMS; i++)); do
-    building=${buildings[$((RANDOM % ${#buildings[@]}))]}
-    room_type=${room_types[$((RANDOM % ${#room_types[@]}))]}
-    floor=$((RANDOM % 10 + 1))
-    capacity=$((RANDOM % 50 + 5))
-    room_number="${building:0:1}${floor}$(printf "%02d" $((RANDOM % 99 + 1)))"
+echo "=== Sample Queries ==="
 
-    echo "INSERT INTO rooms (room_number, building_name, floor_number, room_type, capacity) VALUES ('$room_number', '$building', $floor, '$room_type', $capacity);"
+echo "Room temperature averages:"
+sqlite3 "$DB_FILE" -header -column "
+SELECT r.room_number, r.building_name, 
+       ROUND(AVG(sl.temperature_celsius), 2) as avg_temp,
+       COUNT(*) as readings
+FROM rooms r 
+JOIN sensor_logs sl ON r.id = sl.room_id 
+GROUP BY r.id 
+ORDER BY avg_temp DESC;"
 
-    if ((i % 10 == 0)); then
-      echo "Created $i rooms..." >&2
-    fi
-  done
-  echo "COMMIT;"
-) | sqlite3 "$DB_FILE"
+echo "Temperature extremes:"
+sqlite3 "$DB_FILE" -header -column "
+SELECT r.room_number, sl.temperature_celsius, sl.timestamp
+FROM rooms r 
+JOIN sensor_logs sl ON r.id = sl.room_id 
+WHERE sl.temperature_celsius IN (
+    (SELECT MAX(temperature_celsius) FROM sensor_logs),
+    (SELECT MIN(temperature_celsius) FROM sensor_logs)
+);"
 
-echo "All rooms created successfully!"
-echo
+echo "High CO2 readings (>1000 ppm):"
+sqlite3 "$DB_FILE" -header -column "
+SELECT r.room_number, sl.co2_ppm, sl.timestamp
+FROM rooms r 
+JOIN sensor_logs sl ON r.id = sl.room_id 
+WHERE sl.co2_ppm > 1000
+ORDER BY sl.co2_ppm DESC
+LIMIT 10;"
 
-# Generate sensor logs for each room
-echo "Generating sensor logs ($LOGS_PER_ROOM per room)..."
-echo "This will create $((NUM_ROOMS * LOGS_PER_ROOM)) total sensor readings..."
+echo "=== Performance Test ==="
+echo "Query performance with indexes:"
+sqlite3 "$DB_FILE" ".timer on" "
+SELECT COUNT(*) as hot_readings 
+FROM sensor_logs 
+WHERE temperature_celsius > 40;"
 
-(
-  echo "BEGIN TRANSACTION;"
-  for ((room_id = 1; room_id <= NUM_ROOMS; room_id++)); do
-    echo "Generating logs for room $room_id..." >&2
-    for ((j = 1; j <= LOGS_PER_ROOM; j++)); do
-      # Generate random sensor data
-      temp=$(echo "scale=1; $RANDOM/32767*60+10" | bc)       # 10-70°C
-      humidity=$(echo "scale=1; $RANDOM/32767*80+20" | bc)   # 20-100%
-      pressure=$(echo "scale=1; $RANDOM/32767*50+1000" | bc) # 1000-1050 hPa
-      co2=$((RANDOM % 1500 + 400))                           # 400-1900 ppm
-      light=$(echo "scale=1; $RANDOM/32767*2000" | bc)       # 0-2000 lux
-      noise=$(echo "scale=1; $RANDOM/32767*80+30" | bc)      # 30-110 dB
-      motion=$((RANDOM % 2))                                 # 0 or 1
-      aqi=$((RANDOM % 300 + 1))                              # 1-300
-      occupancy=$((RANDOM % 20))                             # 0-19 people
-      voltage=$(echo "scale=2; $RANDOM/32767*50+200" | bc)   # 200-250V
-      power=$(echo "scale=2; $RANDOM/32767*5000+100" | bc)   # 100-5100W
-
-      # Generate timestamp (random time within last 30 days)
-      days_ago=$((RANDOM % 30))
-      hours=$((RANDOM % 24))
-      minutes=$((RANDOM % 60))
-      seconds=$((RANDOM % 60))
-      timestamp=$(date -d "$days_ago days ago $hours:$minutes:$seconds" '+%Y-%m-%d %H:%M:%S')
-
-      echo "INSERT INTO sensor_logs (room_id, timestamp, temperature_celsius, humidity_percent, pressure_hpa, co2_ppm, light_lux, noise_db, motion_detected, air_quality_index, occupancy_count, voltage_v, power_consumption_w) VALUES ($room_id, '$timestamp', $temp, $humidity, $pressure, $co2, $light, $noise, $motion, $aqi, $occupancy, $voltage, $power);"
-    done
-    if ((room_id % 5 == 0)); then
-      echo "Completed $room_id/$NUM_ROOMS rooms..." >&2
-    fi
-  done
-  echo "COMMIT;"
-) | sqlite3 "$DB_FILE"
-
-echo "Sample data inserted successfully!"
-echo "Total sensor readings: $((NUM_ROOMS * LOGS_PER_ROOM))"
-echo
-
-# Demonstrate SQLite3 CLI operations
-echo "=== SQLite3 CLI Tutorial - Basic Operations ==="
-echo
-
-echo "1. Show all tables:"
-echo "Command: sqlite3 $DB_FILE '.tables'"
-sqlite3 "$DB_FILE" '.tables'
-echo
-
-echo "2. Show schema for sensor_logs table:"
-echo "Command: sqlite3 $DB_FILE '.schema sensor_logs'"
-sqlite3 "$DB_FILE" '.schema sensor_logs'
-echo
-
-echo "3. Show all indexes:"
-echo "Command: sqlite3 $DB_FILE '.indexes'"
-sqlite3 "$DB_FILE" '.indexes'
-echo
-
-echo "=== Basic SELECT Queries ==="
-echo
-
-echo "4. Count total sensor readings:"
-echo "Command: sqlite3 $DB_FILE 'SELECT COUNT(*) as total_readings FROM sensor_logs;'"
-sqlite3 "$DB_FILE" 'SELECT COUNT(*) as total_readings FROM sensor_logs;'
-echo
-
-echo "5. Show room summary:"
-echo "Command: sqlite3 $DB_FILE 'SELECT building_name, COUNT(*) as room_count FROM rooms GROUP BY building_name;'"
-sqlite3 "$DB_FILE" 'SELECT building_name, COUNT(*) as room_count FROM rooms GROUP BY building_name;'
-echo
-
-echo "=== Temperature Analysis Queries ==="
-echo
-
-echo "6. Rooms with temperature around 40°C (39-41°C range):"
-echo "Command: sqlite3 $DB_FILE 'SELECT r.room_number, r.building_name, sl.temperature_celsius, sl.timestamp FROM rooms r JOIN sensor_logs sl ON r.id = sl.room_id WHERE sl.temperature_celsius BETWEEN 39.0 AND 41.0 ORDER BY sl.temperature_celsius DESC LIMIT 10;'"
-sqlite3 "$DB_FILE" 'SELECT r.room_number, r.building_name, sl.temperature_celsius, sl.timestamp FROM rooms r JOIN sensor_logs sl ON r.id = sl.room_id WHERE sl.temperature_celsius BETWEEN 39.0 AND 41.0 ORDER BY sl.temperature_celsius DESC LIMIT 10;'
-echo
-
-echo "7. Average temperature by room:"
-echo "Command: sqlite3 $DB_FILE 'SELECT r.room_number, r.building_name, ROUND(AVG(sl.temperature_celsius), 2) as avg_temp FROM rooms r JOIN sensor_logs sl ON r.id = sl.room_id GROUP BY r.id ORDER BY avg_temp DESC LIMIT 10;'"
-sqlite3 "$DB_FILE" 'SELECT r.room_number, r.building_name, ROUND(AVG(sl.temperature_celsius), 2) as avg_temp FROM rooms r JOIN sensor_logs sl ON r.id = sl.room_id GROUP BY r.id ORDER BY avg_temp DESC LIMIT 10;'
-echo
-
-echo "8. Temperature extremes (hottest and coldest readings):"
-echo "Command: sqlite3 $DB_FILE 'SELECT r.room_number, r.building_name, sl.temperature_celsius, sl.timestamp FROM rooms r JOIN sensor_logs sl ON r.id = sl.room_id WHERE sl.temperature_celsius = (SELECT MAX(temperature_celsius) FROM sensor_logs) OR sl.temperature_celsius = (SELECT MIN(temperature_celsius) FROM sensor_logs);'"
-sqlite3 "$DB_FILE" 'SELECT r.room_number, r.building_name, sl.temperature_celsius, sl.timestamp FROM rooms r JOIN sensor_logs sl ON r.id = sl.room_id WHERE sl.temperature_celsius = (SELECT MAX(temperature_celsius) FROM sensor_logs) OR sl.temperature_celsius = (SELECT MIN(temperature_celsius) FROM sensor_logs);'
-echo
-
-echo "9. Rooms with high temperature variance:"
-echo "Command: sqlite3 $DB_FILE 'SELECT r.room_number, r.building_name, ROUND(AVG(sl.temperature_celsius), 2) as avg_temp, ROUND(MIN(sl.temperature_celsius), 2) as min_temp, ROUND(MAX(sl.temperature_celsius), 2) as max_temp, ROUND(MAX(sl.temperature_celsius) - MIN(sl.temperature_celsius), 2) as temp_range FROM rooms r JOIN sensor_logs sl ON r.id = sl.room_id GROUP BY r.id HAVING temp_range > 30 ORDER BY temp_range DESC LIMIT 10;'"
-sqlite3 "$DB_FILE" 'SELECT r.room_number, r.building_name, ROUND(AVG(sl.temperature_celsius), 2) as avg_temp, ROUND(MIN(sl.temperature_celsius), 2) as min_temp, ROUND(MAX(sl.temperature_celsius), 2) as max_temp, ROUND(MAX(sl.temperature_celsius) - MIN(sl.temperature_celsius), 2) as temp_range FROM rooms r JOIN sensor_logs sl ON r.id = sl.room_id GROUP BY r.id HAVING temp_range > 30 ORDER BY temp_range DESC LIMIT 10;'
-echo
-
-echo "=== Advanced Sensor Analysis ==="
-echo
-
-echo "10. Correlation between temperature and humidity:"
-echo "Command: sqlite3 $DB_FILE 'SELECT CASE WHEN temperature_celsius < 20 THEN \"Cold\" WHEN temperature_celsius < 30 THEN \"Moderate\" WHEN temperature_celsius < 40 THEN \"Warm\" ELSE \"Hot\" END as temp_category, ROUND(AVG(humidity_percent), 2) as avg_humidity, COUNT(*) as readings FROM sensor_logs GROUP BY temp_category;'"
-sqlite3 "$DB_FILE" 'SELECT CASE WHEN temperature_celsius < 20 THEN "Cold" WHEN temperature_celsius < 30 THEN "Moderate" WHEN temperature_celsius < 40 THEN "Warm" ELSE "Hot" END as temp_category, ROUND(AVG(humidity_percent), 2) as avg_humidity, COUNT(*) as readings FROM sensor_logs GROUP BY temp_category;'
-echo
-
-echo "11. Rooms with motion detected at high temperatures (>35°C):"
-echo "Command: sqlite3 $DB_FILE 'SELECT r.room_number, r.building_name, COUNT(*) as high_temp_motion_events FROM rooms r JOIN sensor_logs sl ON r.id = sl.room_id WHERE sl.temperature_celsius > 35.0 AND sl.motion_detected = 1 GROUP BY r.id ORDER BY high_temp_motion_events DESC LIMIT 5;'"
-sqlite3 "$DB_FILE" 'SELECT r.room_number, r.building_name, COUNT(*) as high_temp_motion_events FROM rooms r JOIN sensor_logs sl ON r.id = sl.room_id WHERE sl.temperature_celsius > 35.0 AND sl.motion_detected = 1 GROUP BY r.id ORDER BY high_temp_motion_events DESC LIMIT 5;'
-echo
-
-echo "12. Daily temperature trends:"
-echo "Command: sqlite3 $DB_FILE 'SELECT DATE(timestamp) as date, ROUND(AVG(temperature_celsius), 2) as avg_temp, ROUND(MIN(temperature_celsius), 2) as min_temp, ROUND(MAX(temperature_celsius), 2) as max_temp FROM sensor_logs GROUP BY DATE(timestamp) ORDER BY date DESC LIMIT 7;'"
-sqlite3 "$DB_FILE" 'SELECT DATE(timestamp) as date, ROUND(AVG(temperature_celsius), 2) as avg_temp, ROUND(MIN(temperature_celsius), 2) as min_temp, ROUND(MAX(temperature_celsius), 2) as max_temp FROM sensor_logs GROUP BY DATE(timestamp) ORDER BY date DESC LIMIT 7;'
-echo
-
-echo "=== Performance Analysis ==="
-echo
-
-echo "13. Query performance test - Temperature range query with index:"
-echo "Command: sqlite3 $DB_FILE '.timer on' 'SELECT COUNT(*) FROM sensor_logs WHERE temperature_celsius BETWEEN 35.0 AND 45.0;'"
-sqlite3 "$DB_FILE" '.timer on' 'SELECT COUNT(*) FROM sensor_logs WHERE temperature_celsius BETWEEN 35.0 AND 45.0;'
-echo
-
-echo "=== Useful SQLite3 CLI Commands ==="
-echo
-echo "Try these commands yourself:"
-echo "  sqlite3 $DB_FILE                    # Enter interactive mode"
-echo "  .help                               # Show all dot commands"
-echo "  .mode column                        # Better formatting"
-echo "  .headers on                         # Show column headers"
-echo "  .timer on                           # Show query execution time"
-echo "  .explain                            # Show query execution plan"
-echo "  .output results.txt                 # Redirect output to file"
-echo "  .read script.sql                    # Execute SQL from file"
-echo "  .backup backup.db                   # Backup database"
-echo "  .exit                               # Exit SQLite3"
-echo
-
-echo "=== Sample Queries for Temperature Analysis ==="
-echo
-echo "More queries you can try:"
-echo "  # Find readings exactly at 40°C:"
-echo "  sqlite3 $DB_FILE 'SELECT * FROM sensor_logs WHERE ABS(temperature_celsius - 40.0) < 0.1 LIMIT 5;'"
-echo
-echo "  # Temperature distribution:"
-echo "  sqlite3 $DB_FILE 'SELECT ROUND(temperature_celsius) as temp, COUNT(*) as count FROM sensor_logs GROUP BY ROUND(temperature_celsius) ORDER BY temp;'"
-echo
-echo "  # Rooms that never exceeded 40°C:"
-echo "  sqlite3 $DB_FILE 'SELECT r.room_number, MAX(sl.temperature_celsius) as max_temp FROM rooms r JOIN sensor_logs sl ON r.id = sl.room_id GROUP BY r.id HAVING max_temp < 40.0;'"
-echo
-
-echo "=== Tutorial Complete! ==="
-echo "Database '$DB_FILE' has been created with:"
-echo "  - $NUM_ROOMS rooms"
-echo "  - $((NUM_ROOMS * LOGS_PER_ROOM)) sensor readings"
-echo "  - Comprehensive indexes for query performance"
-echo "You can now experiment with your own queries using:"
-echo "  sqlite3 $DB_FILE"
-echo
+echo "Database created: $DB_FILE"
+echo "Use: sqlite3 $DB_FILE"
