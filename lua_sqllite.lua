@@ -157,9 +157,76 @@ db:exec("ANALYZE")
 
 print("Saving to disk...")
 
--- Backup to file
+-- Save to disk by recreating everything
 local file_db = sqlite3.open(DB_FILE)
-db:backup(file_db)
+file_db:exec("PRAGMA synchronous = OFF")
+
+-- Create tables in file database
+file_db:exec([[
+CREATE TABLE rooms (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    room_number TEXT UNIQUE NOT NULL,
+    building_name TEXT NOT NULL,
+    floor_number INTEGER NOT NULL,
+    room_type TEXT NOT NULL,
+    capacity INTEGER
+)
+]])
+
+file_db:exec([[
+CREATE TABLE sensor_logs (
+    room_id INTEGER NOT NULL,
+    timestamp DATETIME NOT NULL,
+    temperature_celsius REAL NOT NULL,
+    humidity_percent REAL NOT NULL,
+    pressure_hpa REAL NOT NULL,
+    co2_ppm INTEGER NOT NULL,
+    light_lux REAL NOT NULL,
+    noise_db REAL NOT NULL,
+    motion_detected BOOLEAN NOT NULL,
+    air_quality_index INTEGER NOT NULL,
+    occupancy_count INTEGER NOT NULL,
+    voltage_v REAL NOT NULL,
+    power_consumption_w REAL NOT NULL
+)
+]])
+
+-- Copy data
+file_db:exec("BEGIN TRANSACTION")
+
+-- Copy rooms
+local file_room_stmt = file_db:prepare("INSERT INTO rooms (id, room_number, building_name, floor_number, room_type, capacity) VALUES (?,?,?,?,?,?)")
+for row in db:nrows("SELECT * FROM rooms") do
+    file_room_stmt:bind_values(row.id, row.room_number, row.building_name, row.floor_number, row.room_type, row.capacity)
+    file_room_stmt:step()
+    file_room_stmt:reset()
+end
+file_room_stmt:finalize()
+
+-- Copy sensor logs
+local file_sensor_stmt = file_db:prepare([[
+INSERT INTO sensor_logs (room_id, timestamp, temperature_celsius, humidity_percent, 
+pressure_hpa, co2_ppm, light_lux, noise_db, motion_detected, air_quality_index, 
+occupancy_count, voltage_v, power_consumption_w) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+]])
+
+for row in db:nrows("SELECT * FROM sensor_logs") do
+    file_sensor_stmt:bind_values(row.room_id, row.timestamp, row.temperature_celsius, 
+        row.humidity_percent, row.pressure_hpa, row.co2_ppm, row.light_lux, row.noise_db,
+        row.motion_detected, row.air_quality_index, row.occupancy_count, row.voltage_v, row.power_consumption_w)
+    file_sensor_stmt:step()
+    file_sensor_stmt:reset()
+end
+file_sensor_stmt:finalize()
+
+file_db:exec("COMMIT")
+
+-- Create indexes in file database
+for _, idx in ipairs(indexes) do
+    file_db:exec(idx)
+end
+
+file_db:exec("ANALYZE")
 file_db:close()
 db:close()
 
