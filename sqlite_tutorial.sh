@@ -5,8 +5,8 @@
 # with realistic sensor data and demonstrating various SQL operations
 
 # Configuration variables
-NUM_ROOMS=50
-LOGS_PER_ROOM=100000
+NUM_ROOMS=2
+LOGS_PER_ROOM=1000
 DB_FILE="tutorial.db"
 
 echo "=== SQLite3 CLI Tutorial ==="
@@ -15,8 +15,8 @@ echo
 
 # Remove existing database to ensure idempotency
 if [ -f "$DB_FILE" ]; then
-    echo "Removing existing database..."
-    rm "$DB_FILE"
+  echo "Removing existing database..."
+  rm "$DB_FILE"
 fi
 
 echo "Creating new database: $DB_FILE"
@@ -89,19 +89,23 @@ echo "Generating $NUM_ROOMS rooms..."
 buildings=("North Tower" "South Tower" "East Wing" "West Wing" "Central Hub")
 room_types=("Office" "Conference Room" "Laboratory" "Storage" "Classroom" "Break Room")
 
-for ((i=1; i<=NUM_ROOMS; i++)); do
+(
+  echo "BEGIN TRANSACTION;"
+  for ((i = 1; i <= NUM_ROOMS; i++)); do
     building=${buildings[$((RANDOM % ${#buildings[@]}))]}
     room_type=${room_types[$((RANDOM % ${#room_types[@]}))]}
     floor=$((RANDOM % 10 + 1))
     capacity=$((RANDOM % 50 + 5))
     room_number="${building:0:1}${floor}$(printf "%02d" $((RANDOM % 99 + 1)))"
-    
-    sqlite3 "$DB_FILE" "INSERT INTO rooms (room_number, building_name, floor_number, room_type, capacity) VALUES ('$room_number', '$building', $floor, '$room_type', $capacity);"
-    
+
+    echo "INSERT INTO rooms (room_number, building_name, floor_number, room_type, capacity) VALUES ('$room_number', '$building', $floor, '$room_type', $capacity);"
+
     if ((i % 10 == 0)); then
-        echo "Created $i rooms..."
+      echo "Created $i rooms..." >&2
     fi
-done
+  done
+  echo "COMMIT;"
+) | sqlite3 "$DB_FILE"
 
 echo "All rooms created successfully!"
 echo
@@ -110,42 +114,39 @@ echo
 echo "Generating sensor logs ($LOGS_PER_ROOM per room)..."
 echo "This will create $((NUM_ROOMS * LOGS_PER_ROOM)) total sensor readings..."
 
-for ((room_id=1; room_id<=NUM_ROOMS; room_id++)); do
-    echo "Generating logs for room $room_id..."
-    
-    # Create batch insert for better performance
-    sqlite3 "$DB_FILE" <<EOF
-BEGIN TRANSACTION;
-$(for ((j=1; j<=LOGS_PER_ROOM; j++)); do
-    # Generate random sensor data
-    temp=$(echo "scale=1; $RANDOM/32767*60+10" | bc)  # 10-70°C
-    humidity=$(echo "scale=1; $RANDOM/32767*80+20" | bc)  # 20-100%
-    pressure=$(echo "scale=1; $RANDOM/32767*50+1000" | bc)  # 1000-1050 hPa
-    co2=$((RANDOM % 1500 + 400))  # 400-1900 ppm
-    light=$(echo "scale=1; $RANDOM/32767*2000" | bc)  # 0-2000 lux
-    noise=$(echo "scale=1; $RANDOM/32767*80+30" | bc)  # 30-110 dB
-    motion=$((RANDOM % 2))  # 0 or 1
-    aqi=$((RANDOM % 300 + 1))  # 1-300
-    occupancy=$((RANDOM % 20))  # 0-19 people
-    voltage=$(echo "scale=2; $RANDOM/32767*50+200" | bc)  # 200-250V
-    power=$(echo "scale=2; $RANDOM/32767*5000+100" | bc)  # 100-5100W
-    
-    # Generate timestamp (random time within last 30 days)
-    days_ago=$((RANDOM % 30))
-    hours=$((RANDOM % 24))
-    minutes=$((RANDOM % 60))
-    seconds=$((RANDOM % 60))
-    timestamp=$(date -d "$days_ago days ago $hours:$minutes:$seconds" '+%Y-%m-%d %H:%M:%S')
-    
-    echo "INSERT INTO sensor_logs (room_id, timestamp, temperature_celsius, humidity_percent, pressure_hpa, co2_ppm, light_lux, noise_db, motion_detected, air_quality_index, occupancy_count, voltage_v, power_consumption_w) VALUES ($room_id, '$timestamp', $temp, $humidity, $pressure, $co2, $light, $noise, $motion, $aqi, $occupancy, $voltage, $power);"
-done)
-COMMIT;
-EOF
-    
+(
+  echo "BEGIN TRANSACTION;"
+  for ((room_id = 1; room_id <= NUM_ROOMS; room_id++)); do
+    echo "Generating logs for room $room_id..." >&2
+    for ((j = 1; j <= LOGS_PER_ROOM; j++)); do
+      # Generate random sensor data
+      temp=$(echo "scale=1; $RANDOM/32767*60+10" | bc)       # 10-70°C
+      humidity=$(echo "scale=1; $RANDOM/32767*80+20" | bc)   # 20-100%
+      pressure=$(echo "scale=1; $RANDOM/32767*50+1000" | bc) # 1000-1050 hPa
+      co2=$((RANDOM % 1500 + 400))                           # 400-1900 ppm
+      light=$(echo "scale=1; $RANDOM/32767*2000" | bc)       # 0-2000 lux
+      noise=$(echo "scale=1; $RANDOM/32767*80+30" | bc)      # 30-110 dB
+      motion=$((RANDOM % 2))                                 # 0 or 1
+      aqi=$((RANDOM % 300 + 1))                              # 1-300
+      occupancy=$((RANDOM % 20))                             # 0-19 people
+      voltage=$(echo "scale=2; $RANDOM/32767*50+200" | bc)   # 200-250V
+      power=$(echo "scale=2; $RANDOM/32767*5000+100" | bc)   # 100-5100W
+
+      # Generate timestamp (random time within last 30 days)
+      days_ago=$((RANDOM % 30))
+      hours=$((RANDOM % 24))
+      minutes=$((RANDOM % 60))
+      seconds=$((RANDOM % 60))
+      timestamp=$(date -d "$days_ago days ago $hours:$minutes:$seconds" '+%Y-%m-%d %H:%M:%S')
+
+      echo "INSERT INTO sensor_logs (room_id, timestamp, temperature_celsius, humidity_percent, pressure_hpa, co2_ppm, light_lux, noise_db, motion_detected, air_quality_index, occupancy_count, voltage_v, power_consumption_w) VALUES ($room_id, '$timestamp', $temp, $humidity, $pressure, $co2, $light, $noise, $motion, $aqi, $occupancy, $voltage, $power);"
+    done
     if ((room_id % 5 == 0)); then
-        echo "Completed $room_id/$NUM_ROOMS rooms..."
+      echo "Completed $room_id/$NUM_ROOMS rooms..." >&2
     fi
-done
+  done
+  echo "COMMIT;"
+) | sqlite3 "$DB_FILE"
 
 echo "Sample data inserted successfully!"
 echo "Total sensor readings: $((NUM_ROOMS * LOGS_PER_ROOM))"
